@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "outDir": "./dist",
+    "rootDir": ".",
+    "declaration": true,
+    "sourceMap": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "tee-simulator/**/*.ts",
+    "test/**/*.ts",
+    "scripts/**/*.ts",
+    "hardhat.config.ts"
+  ],
+  "exclude": ["node_modules", "dist", "artifacts", "cache"]
+}
