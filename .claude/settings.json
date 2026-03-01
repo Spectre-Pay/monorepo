@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx hardhat run scripts/simulate-flow.ts --network localhost)",
+      "Bash(npx patch-package @safe-global/safe-contracts)"
+    ]
+  }
+}
