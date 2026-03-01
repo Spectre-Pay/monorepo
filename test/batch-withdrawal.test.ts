@@ -1,49 +1,43 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
-import { SpectreGuard } from "../typechain-types";
 import {
   deploySafe,
-  signInboundAttestation,
   signOutboundAttestation,
+  signInboundAttestation,
+  sendAttestedDeposit,
   execSafeWithAttestation,
   invoiceId,
   currentTimestamp,
 } from "./helpers";
 
 describe("Batch Withdrawal — Multi-Safe Consolidation", function () {
-  let guardA: SpectreGuard;
-  let guardB: SpectreGuard;
-  let guardC: SpectreGuard;
-  let safeA: any;
-  let safeB: any;
-  let safeC: any;
+  let guardA: any, guardB: any, guardC: any;
+  let safeA: any, safeB: any, safeC: any;
+  let safeAAddr: string, safeBAddr: string, safeCAddr: string;
+  let guardAAddr: string, guardBAddr: string, guardCAddr: string;
   let payer: HardhatEthersSigner;
   let recipient: HardhatEthersSigner;
   let teeSigner: HardhatEthersSigner;
   let destination: HardhatEthersSigner;
   let chainId: number;
+  let fundNonce: number = 100;
 
-  // Helper to setup a Safe with guard and fund it
-  async function setupFundedSafe(
+  async function setupGuardedSafe(
     safeOwner: HardhatEthersSigner,
     tee: HardhatEthersSigner,
     funder: HardhatEthersSigner,
-    fundAmount: bigint,
-    inv: string,
-    nonce: number
-  ): Promise<{ safe: any; guard: SpectreGuard }> {
-    // Deploy Safe
+    fundAmount: bigint
+  ) {
     const safe = await deploySafe([safeOwner.address], 1);
     const safeAddr = await safe.getAddress();
 
-    // Deploy Guard
     const GuardFactory = await ethers.getContractFactory("SpectreGuard");
     const guard = await GuardFactory.deploy(tee.address, safeAddr);
     await guard.waitForDeployment();
     const guardAddr = await guard.getAddress();
 
-    // Attach guard (before guard is active)
+    // Attach guard
     const setGuardData = safe.interface.encodeFunctionData("setGuard", [guardAddr]);
     const safeNonce = await safe.nonce();
     const txHash = await safe.getTransactionHash(
@@ -53,58 +47,37 @@ describe("Batch Withdrawal — Multi-Safe Consolidation", function () {
     const sig = await safeOwner.signMessage(ethers.getBytes(txHash));
     const sigBytes = ethers.getBytes(sig);
     sigBytes[64] += 4;
-
     await safe.execTransaction(
       safeAddr, 0, setGuardData, 0, 0, 0, 0,
-      ethers.ZeroAddress, ethers.ZeroAddress,
-      ethers.hexlify(sigBytes)
+      ethers.ZeroAddress, ethers.ZeroAddress, ethers.hexlify(sigBytes)
     );
 
-    // Fund via attestedDeposit
+    // Fund via attested deposit through guard
     const now = await currentTimestamp();
     const deadline = now + 3600;
-
+    const nonce = fundNonce++;
+    const inv = invoiceId(`FUND-${nonce}`);
     const teeSig = await signInboundAttestation(
       tee, guardAddr, chainId,
-      funder.address, guardAddr,
-      fundAmount, nonce, deadline, inv
+      funder.address, fundAmount, nonce, deadline, inv
     );
+    await sendAttestedDeposit(funder, guardAddr, fundAmount, inv, nonce, deadline, teeSig);
 
-    await guard.connect(funder).attestedDeposit(inv, nonce, deadline, teeSig, {
-      value: fundAmount,
-    });
-
-    return { safe, guard: guard as SpectreGuard };
+    return { safe, guard, safeAddr, guardAddr };
   }
 
   beforeEach(async function () {
     [recipient, payer, teeSigner, destination] = await ethers.getSigners();
     chainId = Number((await ethers.provider.getNetwork()).chainId);
 
-    // Setup 3 funded Safes
-    const setupA = await setupFundedSafe(
-      recipient, teeSigner, payer,
-      ethers.parseEther("1"),
-      invoiceId("BATCH-INV-1"), 0
-    );
-    safeA = setupA.safe;
-    guardA = setupA.guard;
+    const a = await setupGuardedSafe(recipient, teeSigner, payer, ethers.parseEther("1"));
+    safeA = a.safe; guardA = a.guard; safeAAddr = a.safeAddr; guardAAddr = a.guardAddr;
 
-    const setupB = await setupFundedSafe(
-      recipient, teeSigner, payer,
-      ethers.parseEther("0.5"),
-      invoiceId("BATCH-INV-2"), 0
-    );
-    safeB = setupB.safe;
-    guardB = setupB.guard;
+    const b = await setupGuardedSafe(recipient, teeSigner, payer, ethers.parseEther("0.5"));
+    safeB = b.safe; guardB = b.guard; safeBAddr = b.safeAddr; guardBAddr = b.guardAddr;
 
-    const setupC = await setupFundedSafe(
-      recipient, teeSigner, payer,
-      ethers.parseEther("2"),
-      invoiceId("BATCH-INV-3"), 0
-    );
-    safeC = setupC.safe;
-    guardC = setupC.guard;
+    const c = await setupGuardedSafe(recipient, teeSigner, payer, ethers.parseEther("2"));
+    safeC = c.safe; guardC = c.guard; safeCAddr = c.safeAddr; guardCAddr = c.guardAddr;
   });
 
   it("batch withdrawal: 3 Safes → single destination", async function () {
@@ -113,53 +86,37 @@ describe("Batch Withdrawal — Multi-Safe Consolidation", function () {
     const destAddr = destination.address;
     const destBefore = await ethers.provider.getBalance(destAddr);
 
-    // Withdraw from Safe A (1 ETH)
-    const guardAAddr = await guardA.getAddress();
-    const safeAAddr = await safeA.getAddress();
+    // Withdraw from all 3
     const sigA = await signOutboundAttestation(
       teeSigner, guardAAddr, chainId,
-      safeAAddr, destAddr,
-      ethers.parseEther("1"), 1, deadline, invoiceId("BATCH-OUT-A")
+      safeAAddr, destAddr, ethers.parseEther("1"), 0, deadline, invoiceId("BATCH-A")
     );
     await execSafeWithAttestation(
-      safeA, recipient, destAddr,
-      ethers.parseEther("1"), "0x",
-      1, deadline, invoiceId("BATCH-OUT-A"), sigA
+      safeA, recipient, destAddr, ethers.parseEther("1"), "0x",
+      0, deadline, invoiceId("BATCH-A"), sigA
     );
 
-    // Withdraw from Safe B (0.5 ETH)
-    const guardBAddr = await guardB.getAddress();
-    const safeBAddr = await safeB.getAddress();
     const sigB = await signOutboundAttestation(
       teeSigner, guardBAddr, chainId,
-      safeBAddr, destAddr,
-      ethers.parseEther("0.5"), 1, deadline, invoiceId("BATCH-OUT-B")
+      safeBAddr, destAddr, ethers.parseEther("0.5"), 0, deadline, invoiceId("BATCH-B")
     );
     await execSafeWithAttestation(
-      safeB, recipient, destAddr,
-      ethers.parseEther("0.5"), "0x",
-      1, deadline, invoiceId("BATCH-OUT-B"), sigB
+      safeB, recipient, destAddr, ethers.parseEther("0.5"), "0x",
+      0, deadline, invoiceId("BATCH-B"), sigB
     );
 
-    // Withdraw from Safe C (2 ETH)
-    const guardCAddr = await guardC.getAddress();
-    const safeCAddr = await safeC.getAddress();
     const sigC = await signOutboundAttestation(
       teeSigner, guardCAddr, chainId,
-      safeCAddr, destAddr,
-      ethers.parseEther("2"), 1, deadline, invoiceId("BATCH-OUT-C")
+      safeCAddr, destAddr, ethers.parseEther("2"), 0, deadline, invoiceId("BATCH-C")
     );
     await execSafeWithAttestation(
-      safeC, recipient, destAddr,
-      ethers.parseEther("2"), "0x",
-      1, deadline, invoiceId("BATCH-OUT-C"), sigC
+      safeC, recipient, destAddr, ethers.parseEther("2"), "0x",
+      0, deadline, invoiceId("BATCH-C"), sigC
     );
 
-    // Destination should have received 3.5 ETH total
     const destAfter = await ethers.provider.getBalance(destAddr);
     expect(destAfter - destBefore).to.equal(ethers.parseEther("3.5"));
 
-    // All Safes should be empty
     expect(await ethers.provider.getBalance(safeAAddr)).to.equal(0);
     expect(await ethers.provider.getBalance(safeBAddr)).to.equal(0);
     expect(await ethers.provider.getBalance(safeCAddr)).to.equal(0);
@@ -171,61 +128,40 @@ describe("Batch Withdrawal — Multi-Safe Consolidation", function () {
     const destAddr = destination.address;
     const destBefore = await ethers.provider.getBalance(destAddr);
 
-    // Withdraw from Safe A (1 ETH) — succeeds
-    const guardAAddr = await guardA.getAddress();
-    const safeAAddr = await safeA.getAddress();
+    // A succeeds
     const sigA = await signOutboundAttestation(
       teeSigner, guardAAddr, chainId,
-      safeAAddr, destAddr,
-      ethers.parseEther("1"), 1, deadline, invoiceId("PARTIAL-OUT-A")
+      safeAAddr, destAddr, ethers.parseEther("1"), 0, deadline, invoiceId("PARTIAL-A")
     );
     await execSafeWithAttestation(
-      safeA, recipient, destAddr,
-      ethers.parseEther("1"), "0x",
-      1, deadline, invoiceId("PARTIAL-OUT-A"), sigA
+      safeA, recipient, destAddr, ethers.parseEther("1"), "0x",
+      0, deadline, invoiceId("PARTIAL-A"), sigA
     );
 
-    // Safe B — TEE refuses attestation (simulate by using wrong signer)
-    const guardBAddr = await guardB.getAddress();
-    const safeBAddr = await safeB.getAddress();
-
-    // Use payer as signer (not the registered TEE signer) to simulate TEE refusal
+    // B blocked (wrong signer simulates TEE refusal)
     const badSigB = await signOutboundAttestation(
-      payer, // wrong signer — simulates TEE refusal
-      guardBAddr, chainId,
-      safeBAddr, destAddr,
-      ethers.parseEther("0.5"), 1, deadline, invoiceId("PARTIAL-OUT-B")
+      payer, guardBAddr, chainId,
+      safeBAddr, destAddr, ethers.parseEther("0.5"), 0, deadline, invoiceId("PARTIAL-B")
     );
-
     await expect(
       execSafeWithAttestation(
-        safeB, recipient, destAddr,
-        ethers.parseEther("0.5"), "0x",
-        1, deadline, invoiceId("PARTIAL-OUT-B"), badSigB
+        safeB, recipient, destAddr, ethers.parseEther("0.5"), "0x",
+        0, deadline, invoiceId("PARTIAL-B"), badSigB
       )
     ).to.be.reverted;
 
-    // Withdraw from Safe C (2 ETH) — succeeds
-    const guardCAddr = await guardC.getAddress();
-    const safeCAddr = await safeC.getAddress();
+    // C succeeds
     const sigC = await signOutboundAttestation(
       teeSigner, guardCAddr, chainId,
-      safeCAddr, destAddr,
-      ethers.parseEther("2"), 1, deadline, invoiceId("PARTIAL-OUT-C")
+      safeCAddr, destAddr, ethers.parseEther("2"), 0, deadline, invoiceId("PARTIAL-C")
     );
     await execSafeWithAttestation(
-      safeC, recipient, destAddr,
-      ethers.parseEther("2"), "0x",
-      1, deadline, invoiceId("PARTIAL-OUT-C"), sigC
+      safeC, recipient, destAddr, ethers.parseEther("2"), "0x",
+      0, deadline, invoiceId("PARTIAL-C"), sigC
     );
 
-    // Destination should have received 3 ETH (A + C, not B)
     const destAfter = await ethers.provider.getBalance(destAddr);
     expect(destAfter - destBefore).to.equal(ethers.parseEther("3"));
-
-    // Safe B still holds its funds
-    expect(await ethers.provider.getBalance(safeBAddr)).to.equal(
-      ethers.parseEther("0.5")
-    );
+    expect(await ethers.provider.getBalance(safeBAddr)).to.equal(ethers.parseEther("0.5"));
   });
 });

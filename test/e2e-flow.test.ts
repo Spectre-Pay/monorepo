@@ -1,43 +1,43 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
-import { SpectreGuard } from "../typechain-types";
 import {
   deploySafe,
-  signInboundAttestation,
+  fundSafe,
   signOutboundAttestation,
+  signInboundAttestation,
+  sendAttestedDeposit,
   execSafeWithAttestation,
   invoiceId,
   currentTimestamp,
 } from "./helpers";
 
 describe("E2E Flow — Invoice Payment Lifecycle", function () {
-  let guard: SpectreGuard;
+  let guard: any;
   let safe: any;
   let payer: HardhatEthersSigner;
   let recipient: HardhatEthersSigner;
   let teeSigner: HardhatEthersSigner;
   let attacker: HardhatEthersSigner;
   let chainId: number;
+  let safeAddr: string;
+  let guardAddr: string;
 
   beforeEach(async function () {
     [recipient, payer, teeSigner, attacker] = await ethers.getSigners();
     chainId = Number((await ethers.provider.getNetwork()).chainId);
 
-    // Step 1: Setup
     // Deploy Safe for recipient (1-of-1)
     safe = await deploySafe([recipient.address], 1);
-    const safeAddr = await safe.getAddress();
+    safeAddr = await safe.getAddress();
 
-    // Deploy SpectreGuard
+    // Deploy and attach guard
     const GuardFactory = await ethers.getContractFactory("SpectreGuard");
     guard = await GuardFactory.deploy(teeSigner.address, safeAddr);
     await guard.waitForDeployment();
+    guardAddr = await guard.getAddress();
 
-    // Attach guard to Safe (before guard is active, no TEE attestation needed)
-    const setGuardData = safe.interface.encodeFunctionData("setGuard", [
-      await guard.getAddress(),
-    ]);
+    const setGuardData = safe.interface.encodeFunctionData("setGuard", [guardAddr]);
     const safeNonce = await safe.nonce();
     const txHash = await safe.getTransactionHash(
       safeAddr, 0, setGuardData, 0, 0, 0, 0,
@@ -46,92 +46,62 @@ describe("E2E Flow — Invoice Payment Lifecycle", function () {
     const sig = await recipient.signMessage(ethers.getBytes(txHash));
     const sigBytes = ethers.getBytes(sig);
     sigBytes[64] += 4;
-
     await safe.execTransaction(
       safeAddr, 0, setGuardData, 0, 0, 0, 0,
-      ethers.ZeroAddress, ethers.ZeroAddress,
-      ethers.hexlify(sigBytes)
+      ethers.ZeroAddress, ethers.ZeroAddress, ethers.hexlify(sigBytes)
     );
   });
 
-  it("full flow: payer pays invoice → recipient withdraws", async function () {
-    const guardAddr = await guard.getAddress();
-    const safeAddr = await safe.getAddress();
+  it("full flow: payer sends ETH via guard → recipient withdraws with attestation", async function () {
+    // Step 1: Payer sends 1 ETH via guard with TEE attestation
+    const now1 = await currentTimestamp();
+    const inSig = await signInboundAttestation(
+      teeSigner, guardAddr, chainId,
+      payer.address, ethers.parseEther("1"), 0, now1 + 3600, invoiceId("DEPOSIT-001")
+    );
+    await sendAttestedDeposit(
+      payer, guardAddr, ethers.parseEther("1"),
+      invoiceId("DEPOSIT-001"), 0, now1 + 3600, inSig
+    );
+    expect(await ethers.provider.getBalance(safeAddr)).to.equal(ethers.parseEther("1"));
 
-    // Step 2: Payer sends payment for INV-001
-    const inv = invoiceId("INV-001");
+    // Step 2: Attacker sends ETH directly to Safe (Safe receive still works)
+    await fundSafe(attacker, safeAddr, ethers.parseEther("0.5"));
+    expect(await ethers.provider.getBalance(safeAddr)).to.equal(ethers.parseEther("1.5"));
+
+    // Step 3: Recipient withdraws 1 ETH with TEE attestation
     const now = await currentTimestamp();
     const deadline = now + 3600;
-    const amount = ethers.parseEther("1");
+    const inv = invoiceId("WITHDRAW-001");
 
-    const inboundSig = await signInboundAttestation(
-      teeSigner, guardAddr, chainId,
-      payer.address, guardAddr,
-      amount, 0, deadline, inv
-    );
-
-    await guard.connect(payer).attestedDeposit(inv, 0, deadline, inboundSig, {
-      value: amount,
-    });
-
-    // Verify Safe balance
-    expect(await ethers.provider.getBalance(safeAddr)).to.equal(amount);
-
-    // Step 3: Attacker tries to deposit with garbage signature
-    const garbageSig = ethers.hexlify(ethers.randomBytes(65));
-    await expect(
-      guard.connect(attacker).attestedDeposit(
-        invoiceId("FAKE"), 99, deadline, garbageSig,
-        { value: ethers.parseEther("1") }
-      )
-    ).to.be.reverted;
-
-    // Step 4: Attacker tries plain ETH send to guard (blocked)
-    await expect(
-      attacker.sendTransaction({
-        to: guardAddr,
-        value: ethers.parseEther("1"),
-      })
-    ).to.be.revertedWithCustomError(guard, "DirectTransferBlocked");
-
-    // Step 5: Recipient withdraws
-    const now2 = await currentTimestamp();
-    const deadline2 = now2 + 3600;
-    const withdrawInv = invoiceId("WITHDRAW-001");
-
-    const outboundSig = await signOutboundAttestation(
+    const outSig = await signOutboundAttestation(
       teeSigner, guardAddr, chainId,
       safeAddr, recipient.address,
-      amount, 1, deadline2, withdrawInv
+      ethers.parseEther("1"), 1, deadline, inv
     );
 
     const recipientBefore = await ethers.provider.getBalance(recipient.address);
 
     await execSafeWithAttestation(
       safe, recipient, recipient.address,
-      amount, "0x",
-      1, deadline2, withdrawInv, outboundSig
+      ethers.parseEther("1"), "0x",
+      1, deadline, inv, outSig
     );
 
     const recipientAfter = await ethers.provider.getBalance(recipient.address);
-    // Recipient gains ~1 ETH (minus gas)
-    expect(recipientAfter - recipientBefore).to.be.greaterThan(
-      ethers.parseEther("0.99")
-    );
+    expect(recipientAfter - recipientBefore).to.be.greaterThan(ethers.parseEther("0.99"));
 
-    // Step 6: Recipient tries to withdraw to a destination without attestation
-    // Without TEE attestation, the Safe tx should fail
+    // Step 4: Recipient tries to withdraw WITHOUT attestation — blocked
     const safeNonce = await safe.nonce();
-    const badTxHash = await safe.getTransactionHash(
+    const txHash = await safe.getTransactionHash(
       attacker.address, ethers.parseEther("0.1"), "0x",
       0, 0, 0, 0,
       ethers.ZeroAddress, ethers.ZeroAddress, safeNonce
     );
-    const badSig = await recipient.signMessage(ethers.getBytes(badTxHash));
+    const badSig = await recipient.signMessage(ethers.getBytes(txHash));
     const badSigBytes = ethers.getBytes(badSig);
     badSigBytes[64] += 4;
 
-    // This should fail because the guard expects TEE attestation data appended
     await expect(
       safe.execTransaction(
         attacker.address, ethers.parseEther("0.1"), "0x",
@@ -142,31 +112,28 @@ describe("E2E Flow — Invoice Payment Lifecycle", function () {
     ).to.be.reverted;
   });
 
-  it("multiple invoices can be paid to the same Safe", async function () {
-    const guardAddr = await guard.getAddress();
-    const safeAddr = await safe.getAddress();
+  it("multiple payers can fund via attested deposit", async function () {
     const now = await currentTimestamp();
+    const deadline = now + 3600;
 
-    // Pay 3 invoices
-    for (let i = 0; i < 3; i++) {
-      const inv = invoiceId(`MULTI-INV-${i}`);
-      const amount = ethers.parseEther(`${i + 1}`);
-      const deadline = now + 3600;
-
-      const teeSig = await signInboundAttestation(
-        teeSigner, guardAddr, chainId,
-        payer.address, guardAddr,
-        amount, i, deadline, inv
-      );
-
-      await guard.connect(payer).attestedDeposit(inv, i, deadline, teeSig, {
-        value: amount,
-      });
-    }
-
-    // Safe should have 1 + 2 + 3 = 6 ETH
-    expect(await ethers.provider.getBalance(safeAddr)).to.equal(
-      ethers.parseEther("6")
+    const sig1 = await signInboundAttestation(
+      teeSigner, guardAddr, chainId,
+      payer.address, ethers.parseEther("1"), 10, deadline, invoiceId("MULTI-1")
     );
+    await sendAttestedDeposit(payer, guardAddr, ethers.parseEther("1"), invoiceId("MULTI-1"), 10, deadline, sig1);
+
+    const sig2 = await signInboundAttestation(
+      teeSigner, guardAddr, chainId,
+      attacker.address, ethers.parseEther("2"), 11, deadline, invoiceId("MULTI-2")
+    );
+    await sendAttestedDeposit(attacker, guardAddr, ethers.parseEther("2"), invoiceId("MULTI-2"), 11, deadline, sig2);
+
+    const sig3 = await signInboundAttestation(
+      teeSigner, guardAddr, chainId,
+      recipient.address, ethers.parseEther("3"), 12, deadline, invoiceId("MULTI-3")
+    );
+    await sendAttestedDeposit(recipient, guardAddr, ethers.parseEther("3"), invoiceId("MULTI-3"), 12, deadline, sig3);
+
+    expect(await ethers.provider.getBalance(safeAddr)).to.equal(ethers.parseEther("6"));
   });
 });

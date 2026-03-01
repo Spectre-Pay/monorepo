@@ -3,8 +3,8 @@ import { ethers } from "hardhat";
 /**
  * Simulates the full Spectre invoice flow:
  * 1. Deploy infrastructure
- * 2. Payer sends attested deposit
- * 3. Recipient withdraws with attestation
+ * 2. Payer sends ETH directly to Safe
+ * 3. Recipient withdraws with TEE attestation
  */
 async function main() {
   const [deployer, payer, recipient] = await ethers.getSigners();
@@ -26,7 +26,6 @@ async function main() {
   const proxyFactory = await ProxyFactoryFactory.deploy();
   await proxyFactory.waitForDeployment();
 
-  // Create Safe for recipient
   const setupData = safeSingleton.interface.encodeFunctionData("setup", [
     [recipient.address], 1,
     ethers.ZeroAddress, "0x", ethers.ZeroAddress,
@@ -43,7 +42,6 @@ async function main() {
   const safeAddress = proxyFactory.interface.parseLog(event!)!.args[0];
   const safe = new ethers.Contract(safeAddress, safeSingleton.interface, recipient);
 
-  // Use deployer as TEE signer for simulation
   const teeSigner = deployer;
 
   const GuardFactory = await ethers.getContractFactory("SpectreGuard");
@@ -71,15 +69,15 @@ async function main() {
   console.log("  Guard deployed at:   ", guardAddr);
   console.log("  Guard attached to Safe");
 
-  // --- Payer sends payment ---
-  console.log("\n--- STEP 2: Payer Sends 1 ETH (Invoice INV-001) ---");
-  const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("INV-001"));
-  const block = await ethers.provider.getBlock("latest");
-  const deadline = block!.timestamp + 3600;
+  // --- Payer sends ETH via Guard with TEE attestation ---
+  console.log("\n--- STEP 2: Payer Sends 1 ETH via Guard (TEE attested) ---");
   const amount = ethers.parseEther("1");
+  const block0 = await ethers.provider.getBlock("latest");
+  const depositDeadline = block0!.timestamp + 3600;
+  const depositInvoiceId = ethers.keccak256(ethers.toUtf8Bytes("DEPOSIT-001"));
 
-  // TEE signs inbound attestation
-  const domain = {
+  // Sign inbound attestation
+  const inboundDomain = {
     name: "SpectreGuard",
     version: "1",
     chainId,
@@ -95,31 +93,46 @@ async function main() {
       { name: "invoiceId", type: "bytes32" },
     ],
   };
-  const inboundSig = await teeSigner.signTypedData(domain, inboundTypes, {
+  const inboundSig = await teeSigner.signTypedData(inboundDomain, inboundTypes, {
     from: payer.address,
     to: guardAddr,
     value: amount,
     nonce: 0,
-    deadline,
-    invoiceId,
+    deadline: depositDeadline,
+    invoiceId: depositInvoiceId,
   });
 
-  const depositTx = await guard.connect(payer).attestedDeposit(
-    invoiceId, 0, deadline, inboundSig, { value: amount }
+  // Pack calldata: invoiceId(32) | nonce(32) | deadline(32) | teeSignature(65)
+  const abiCoder0 = ethers.AbiCoder.defaultAbiCoder();
+  const inboundPacked = abiCoder0.encode(
+    ["bytes32", "uint256", "uint256"],
+    [depositInvoiceId, 0, depositDeadline]
   );
+  const inboundCalldata = ethers.concat([inboundPacked, inboundSig]);
+
+  const depositTx = await payer.sendTransaction({
+    to: guardAddr,
+    value: amount,
+    data: inboundCalldata,
+  });
   await depositTx.wait();
 
   const safeBalance = await ethers.provider.getBalance(safeAddress);
   console.log("  Deposit tx hash:     ", depositTx.hash);
   console.log("  Safe balance:        ", ethers.formatEther(safeBalance), "ETH");
 
-  // --- Recipient withdraws ---
-  console.log("\n--- STEP 3: Recipient Withdraws 1 ETH ---");
-  const block2 = await ethers.provider.getBlock("latest");
-  const deadline2 = block2!.timestamp + 3600;
-  const withdrawInvoiceId = ethers.keccak256(ethers.toUtf8Bytes("WITHDRAW-001"));
+  // --- Recipient withdraws with TEE attestation ---
+  console.log("\n--- STEP 3: Recipient Withdraws 1 ETH (TEE attested) ---");
+  const block = await ethers.provider.getBlock("latest");
+  const deadline = block!.timestamp + 3600;
+  const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("WITHDRAW-001"));
 
-  // TEE signs outbound attestation
+  const domain = {
+    name: "SpectreGuard",
+    version: "1",
+    chainId,
+    verifyingContract: guardAddr,
+  };
   const outboundTypes = {
     SpectreOutbound: [
       { name: "safe", type: "address" },
@@ -135,8 +148,8 @@ async function main() {
     to: recipient.address,
     value: amount,
     nonce: 1,
-    deadline: deadline2,
-    invoiceId: withdrawInvoiceId,
+    deadline,
+    invoiceId,
   });
 
   // Build Safe owner signature
@@ -153,7 +166,7 @@ async function main() {
   const abiCoder = ethers.AbiCoder.defaultAbiCoder();
   const teePacked = abiCoder.encode(
     ["uint256", "uint256", "bytes32"],
-    [1, deadline2, withdrawInvoiceId]
+    [1, deadline, invoiceId]
   );
   const combinedSigs = ethers.concat([
     ethers.hexlify(safeSigBytes),
