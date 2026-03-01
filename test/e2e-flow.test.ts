@@ -3,7 +3,6 @@ import { ethers } from "hardhat";
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import {
   deploySafe,
-  fundSafe,
   signOutboundAttestation,
   signInboundAttestation,
   sendAttestedDeposit,
@@ -65,9 +64,11 @@ describe("E2E Flow — Invoice Payment Lifecycle", function () {
     );
     expect(await ethers.provider.getBalance(safeAddr)).to.equal(ethers.parseEther("1"));
 
-    // Step 2: Attacker sends ETH directly to Safe (Safe receive still works)
-    await fundSafe(attacker, safeAddr, ethers.parseEther("0.5"));
-    expect(await ethers.provider.getBalance(safeAddr)).to.equal(ethers.parseEther("1.5"));
+    // Step 2: Attacker tries to send ETH directly to Safe — blocked by patched receive()
+    await expect(
+      attacker.sendTransaction({ to: safeAddr, value: ethers.parseEther("0.5") })
+    ).to.be.reverted;
+    expect(await ethers.provider.getBalance(safeAddr)).to.equal(ethers.parseEther("1"));
 
     // Step 3: Recipient withdraws 1 ETH with TEE attestation
     const now = await currentTimestamp();

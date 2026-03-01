@@ -4,7 +4,6 @@ import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 import { SpectreGuard } from "../typechain-types";
 import {
   deploySafe,
-  fundSafe,
   signOutboundAttestation,
   signInboundAttestation,
   sendAttestedDeposit,
@@ -162,17 +161,26 @@ describe("SpectreGuard", function () {
       ).to.be.revertedWithCustomError(guard, "ZeroValue");
     });
 
-    it("anyone can send ETH to the Safe directly (Safe receive still works)", async function () {
-      await fundSafe(payer, safeAddr, ethers.parseEther("2"));
-      await fundSafe(attacker, safeAddr, ethers.parseEther("3"));
-      expect(await ethers.provider.getBalance(safeAddr)).to.equal(ethers.parseEther("5"));
+    it("direct ETH send to Safe is blocked when guard is set", async function () {
+      await expect(
+        payer.sendTransaction({ to: safeAddr, value: ethers.parseEther("1") })
+      ).to.be.reverted;
     });
   });
 
   describe("Outbound — checkTransaction via Safe.execTransaction", function () {
     beforeEach(async function () {
-      // Fund Safe directly
-      await fundSafe(payer, safeAddr, ethers.parseEther("5"));
+      // Fund Safe via attested deposit through guard
+      const now = await currentTimestamp();
+      const deadline = now + 3600;
+      const teeSig = await signInboundAttestation(
+        teeSigner, guardAddr, chainId,
+        payer.address, ethers.parseEther("5"), 49, deadline, invoiceId("FUND-OUT")
+      );
+      await sendAttestedDeposit(
+        payer, guardAddr, ethers.parseEther("5"),
+        invoiceId("FUND-OUT"), 49, deadline, teeSig
+      );
     });
 
     it("allows ETH send with valid TEE attestation", async function () {
@@ -358,8 +366,15 @@ describe("SpectreGuard", function () {
         0, deadline, invoiceId("ROTATE"), rotSig
       );
 
-      // Fund Safe and try withdrawal with old signer
-      await fundSafe(payer, safeAddr, ethers.parseEther("1"));
+      // Fund Safe via attested deposit (using new signer = attacker)
+      const fundSig = await signInboundAttestation(
+        attacker, guardAddr, chainId,
+        payer.address, ethers.parseEther("1"), 90, deadline, invoiceId("FUND-ROT")
+      );
+      await sendAttestedDeposit(
+        payer, guardAddr, ethers.parseEther("1"),
+        invoiceId("FUND-ROT"), 90, deadline, fundSig
+      );
 
       const oldSig = await signOutboundAttestation(
         teeSigner, guardAddr, chainId,
