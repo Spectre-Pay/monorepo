@@ -1,47 +1,58 @@
 import { HTTPCapability, handler, type Runtime, type HTTPPayload, Runner } from "@chainlink/cre-sdk"
-import { deriveKeysFromMessage, generateStealthAddresses } from "./controller/StealthGeneration"
+import { generateStealthAddresses } from "./controller/StealthGeneration"
 import { generateSafe, executeSafeTx } from "./controller/Safe"
+import { getNonce, incrementNonce, storeEncryptedAddress, getEncryptedAddress } from "./controller/StorageContract"
+import { encrypt, decrypt } from "./controller/Encryption"
 import { hexToBytes } from "@noble/hashes/utils.js"
 
 
 type Config = {
   authorizedEVMAddress: string
+  storageContractAddress: string
+  teePrivateKey: string
 }
 
-interface UserStealthDetails {
-  lastUsedNonce: bigint;
-  spendingPublicKey: Uint8Array;
-  viewingPrivateKey: Uint8Array;
+const getTeeKey = (config: Config): Uint8Array => {
+  if (!config.teePrivateKey) {
+    throw new Error("TEE private key not configured.");
+  }
+  return hexToBytes(config.teePrivateKey.replace(/^0x/, ""));
 }
-
-// address → stealth details
-const userDetails = new Map<string, UserStealthDetails>();
 
 // Callback function that runs when an HTTP request is received
 const onHttpTrigger = async (runtime: Runtime<Config>, payload: HTTPPayload): Promise<string> => {
-  const senderKey = payload.key?.publicKey ?? "";
   const inputStr = new TextDecoder().decode(payload.input);
-  const { signMessage } = JSON.parse(inputStr) as { signMessage?: string };
+  const { spendingPublicKey: spendingPubKeyHex, viewingPrivateKey: viewingPrivKeyHex } = JSON.parse(inputStr) as {
+    spendingPublicKey?: string;
+    viewingPrivateKey?: string;
+  };
 
-  let details = userDetails.get(senderKey);
-
-  if (!details) {
-    if (!signMessage) {
-      throw new Error("User details do not exist. Please provide the sign message to create.");
-    }
-    const { spendingPublicKey, viewingPrivateKey } = deriveKeysFromMessage(signMessage);
-    details = { lastUsedNonce: 0n, spendingPublicKey, viewingPrivateKey };
-    userDetails.set(senderKey, details);
+  if (!spendingPubKeyHex || !viewingPrivKeyHex) {
+    throw new Error("Please provide spendingPublicKey and viewingPrivateKey.");
   }
 
-  const nonce = details.lastUsedNonce;
-  const addresses = generateStealthAddresses(details.spendingPublicKey, details.viewingPrivateKey, nonce);
+  const config = runtime.config;
+  const teeKey = getTeeKey(config);
+  const spendingPublicKey = hexToBytes(spendingPubKeyHex.replace(/^0x/, ""));
+  const viewingPrivateKey = hexToBytes(viewingPrivKeyHex.replace(/^0x/, ""));
 
-  details.lastUsedNonce = addresses.nonce + 1n;
-  userDetails.set(senderKey, details);
+  // Use spendingPubKeyHex as the wnsId
+  const wnsId = spendingPubKeyHex;
 
+  // Get nonce from on-chain Storage contract
+  const nonce = await getNonce(config.storageContractAddress, wnsId);
+  const addresses = generateStealthAddresses(spendingPublicKey, viewingPrivateKey, nonce);
+
+  // Generate Safe for the stealth address
   const stealthAddressBytes = hexToBytes(addresses.stealthAddress.replace(/^0x/, ""));
   const txHash = await generateSafe(stealthAddressBytes);
+
+  // Increment nonce on-chain
+  await incrementNonce(config.storageContractAddress, wnsId);
+
+  // Encrypt the stealth safe address with TEE key and store on-chain
+  const encryptedAddress = encrypt(addresses.stealthAddress, teeKey);
+  await storeEncryptedAddress(config.storageContractAddress, wnsId, encryptedAddress);
 
   return txHash;
 }
@@ -59,18 +70,37 @@ const onExecuteTrigger = async (_runtime: Runtime<Config>, payload: HTTPPayload)
   return receiptHash;
 }
 
+// Callback that decrypts and returns the stored safe address using the TEE key
+const onDecryptTrigger = async (runtime: Runtime<Config>, payload: HTTPPayload): Promise<string> => {
+  const inputStr = new TextDecoder().decode(payload.input);
+  const { wnsId } = JSON.parse(inputStr) as { wnsId?: string };
+
+  if (!wnsId) {
+    throw new Error("Please provide wnsId.");
+  }
+
+  const config = runtime.config;
+  const teeKey = getTeeKey(config);
+
+  const encryptedAddress = await getEncryptedAddress(config.storageContractAddress, wnsId);
+  if (!encryptedAddress) {
+    throw new Error("No stored address found for this wnsId.");
+  }
+
+  const safeAddress = decrypt(encryptedAddress, teeKey);
+  return safeAddress;
+}
+
 const initWorkflow = (config: Config) => {
   const httpTrigger = new HTTPCapability()
   const executeTrigger = new HTTPCapability()
+  const decryptTrigger = new HTTPCapability()
 
   return [
     handler(
       httpTrigger.trigger({
         authorizedKeys: [
-          {
-            type: "KEY_TYPE_ECDSA_EVM",
-            publicKey: config.authorizedEVMAddress,
-          },
+
         ],
       }),
       onHttpTrigger
@@ -78,13 +108,18 @@ const initWorkflow = (config: Config) => {
     handler(
       executeTrigger.trigger({
         authorizedKeys: [
-          {
-            type: "KEY_TYPE_ECDSA_EVM",
-            publicKey: config.authorizedEVMAddress,
-          },
+
         ],
       }),
       onExecuteTrigger
+    ),
+    handler(
+      decryptTrigger.trigger({
+        authorizedKeys: [
+
+        ],
+      }),
+      onDecryptTrigger
     ),
   ]
 }

@@ -1,5 +1,6 @@
 import "@nomicfoundation/hardhat-ethers";
-import { ethers } from "hardhat";
+import hardhat from "hardhat";
+import { ethers } from "ethers";
 
 // Store pending tx context for later execution
 interface PendingTx {
@@ -10,17 +11,23 @@ interface PendingTx {
 
 const pendingTxs = new Map<string, PendingTx>();
 
+const getHardhatEthers = async () => {
+    const connection = await hardhat.network.connect();
+    return connection.ethers;
+}
+
 export const generateSafe = async (deployer: Uint8Array) => {
-    const deployerAddress = ethers.computeAddress(deployer);
-    const [signer] = await ethers.getSigners();
+    const hre = await getHardhatEthers();
+    const deployerAddress = ethers.computeAddress(ethers.hexlify(deployer));
+    const [signer] = await hre.getSigners();
 
     // 1. Deploy Safe singleton
-    const SafeFactory = await ethers.getContractFactory("Safe");
+    const SafeFactory = await hre.getContractFactory("Safe");
     const safeSingleton = await SafeFactory.deploy();
     await safeSingleton.waitForDeployment();
 
     // 2. Deploy SafeProxyFactory
-    const ProxyFactoryFactory = await ethers.getContractFactory("SafeProxyFactory");
+    const ProxyFactoryFactory = await hre.getContractFactory("SafeProxyFactory");
     const proxyFactory = await ProxyFactoryFactory.deploy();
     await proxyFactory.waitForDeployment();
 
@@ -56,7 +63,7 @@ export const generateSafe = async (deployer: Uint8Array) => {
     // 4. Deploy SpectreGuard
     // For local testing, use deployer as TEE signer
     const teeSigner = deployerAddress;
-    const GuardFactory = await ethers.getContractFactory("SpectreGuard");
+    const GuardFactory = await hre.getContractFactory("SpectreGuard");
     const guard = await GuardFactory.deploy(teeSigner, safeAddress);
     await guard.waitForDeployment();
 
@@ -83,10 +90,11 @@ export const generateSafe = async (deployer: Uint8Array) => {
 }
 
 export const executeSafeTx = async (txHash: string, signedTx: string) => {
+    const hre = await getHardhatEthers();
     const pending = pendingTxs.get(txHash);
     if (!pending) throw new Error("No pending transaction found for this txHash.");
 
-    const [signer] = await ethers.getSigners();
+    const [signer] = await hre.getSigners();
     const safe = new ethers.Contract(pending.safeAddress, pending.safeInterface, signer);
 
     const sigBytes = ethers.getBytes(signedTx);

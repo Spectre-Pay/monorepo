@@ -47,5 +47,12 @@ artifacts/
 cache/
 typechain-types/
 
+# CRE build artifacts
+.cre_build_tmp.js
+
+# # Nested git repos (managed separately)
+contracts/
+storage/
+
 # Misc
 *.map
