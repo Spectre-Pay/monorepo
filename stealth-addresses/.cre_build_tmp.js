@@ -18590,7 +18590,7 @@ var setStealthAddress = (runtime2, contractAddress, rpcUrl, privateKey, worldId,
   const data = encodeCalldata(SEL_SET_STEALTH, encodeTwoStrings(worldId, stealthAddr));
   const from2 = computeAddress2(privateKey);
   const nonce = ethGetNonce(runtime2, rpcUrl, from2);
-  const txHash = signAndSendTx(runtime2, rpcUrl, privateKey, {
+  signAndSendTx(runtime2, rpcUrl, privateKey, {
     to: contractAddress,
     data,
     nonce,
@@ -18599,10 +18599,6 @@ var setStealthAddress = (runtime2, contractAddress, rpcUrl, privateKey, worldId,
     maxPriorityFeePerGas: 1000000n,
     chainId
   });
-  const receipt = waitForReceipt(runtime2, rpcUrl, txHash);
-  if (receipt.status === "0x0") {
-    throw new Error(`setStealthAddress tx failed: ${txHash}`);
-  }
 };
 var getStealthAddress = (runtime2, contractAddress, rpcUrl, privateKey, worldId) => {
   const data = encodeCalldata(SEL_GET_STEALTH, encodeSingleString(worldId));
@@ -20428,7 +20424,7 @@ var onSetGuardTrigger = (runtime2, payload) => {
   const inputStr = new TextDecoder().decode(payload.input);
   const { safeProxyAddress, setGuardCalldata, signature } = JSON.parse(inputStr);
   if (!safeProxyAddress || !setGuardCalldata || !signature) {
-    throw new Error("Please provide safeProxyAddress, setGuardCalldata, and signature.");
+    throw new Error("Please provide safeProxyAddress, setGuardCalldata, wnsId, and signature.");
   }
   const txHash = executeSetGuard(runtime2, {
     rpcUrl: runtime2.config.rpcUrl,
@@ -20451,11 +20447,6 @@ var onRegisterAddressTrigger = (runtime2, payload) => {
     throw new Error("Please provide safeProxyAddress and wnsId.");
   }
   const config = runtime2.config;
-  const existing = getStealthAddress(runtime2, config.registryContractAddress, config.rpcUrl, teePrivateKey, wnsId);
-  if (existing) {
-    const result2 = JSON.stringify({ registered: false, existing, safeProxyAddress });
-    return new TextEncoder().encode(result2);
-  }
   setStealthAddress(runtime2, config.registryContractAddress, config.rpcUrl, teePrivateKey, wnsId, safeProxyAddress, BigInt(config.chainId));
   const result = JSON.stringify({ registered: true, safeProxyAddress });
   return new TextEncoder().encode(result);

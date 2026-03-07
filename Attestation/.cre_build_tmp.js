@@ -13861,6 +13861,17 @@ function byteSwap32(arr) {
 }
 var swap32IfBE = isLE ? (u) => u : byteSwap32;
 var hasHexBuiltin = /* @__PURE__ */ (() => typeof Uint8Array.from([]).toHex === "function" && typeof Uint8Array.fromHex === "function")();
+var hexes = /* @__PURE__ */ Array.from({ length: 256 }, (_, i2) => i2.toString(16).padStart(2, "0"));
+function bytesToHex(bytes) {
+  abytes(bytes);
+  if (hasHexBuiltin)
+    return bytes.toHex();
+  let hex = "";
+  for (let i2 = 0;i2 < bytes.length; i2++) {
+    hex += hexes[bytes[i2]];
+  }
+  return hex;
+}
 var asciis = { _0: 48, _9: 57, A: 65, F: 70, a: 97, f: 102 };
 function asciiToBase16(ch) {
   if (ch >= asciis._0 && ch <= asciis._9)
@@ -14864,7 +14875,7 @@ var abytes2 = (value2, length, title = "") => {
 };
 var u8n = (len2) => new Uint8Array(len2);
 var padh = (n, pad) => n.toString(16).padStart(pad, "0");
-var bytesToHex = (b) => Array.from(abytes2(b)).map((e) => padh(e, 2)).join("");
+var bytesToHex2 = (b) => Array.from(abytes2(b)).map((e) => padh(e, 2)).join("");
 var C = { _0: 48, _9: 57, A: 65, F: 70, a: 97, f: 102 };
 var _ch = (ch) => {
   if (ch >= C._0 && ch <= C._9)
@@ -15112,14 +15123,14 @@ class Point {
     return concatBytes(u8of(4), x32b, numTo32b(y));
   }
   toHex(isCompressed) {
-    return bytesToHex(this.toBytes(isCompressed));
+    return bytesToHex2(this.toBytes(isCompressed));
   }
 }
 var G = new Point(Gx, Gy, 1n);
 var I = new Point(0n, 1n, 0n);
 Point.BASE = G;
 Point.ZERO = I;
-var bytesToNumBE = (b) => big("0x" + (bytesToHex(b) || "0"));
+var bytesToNumBE = (b) => big("0x" + (bytesToHex2(b) || "0"));
 var sliceBytesNumBE = (b, from2, to) => bytesToNumBE(b.subarray(from2, to));
 var B256 = 2n ** 256n;
 var numTo32b = (num) => hexToBytes3(padh(arange(num, 0n, B256), L2));
@@ -15390,34 +15401,117 @@ var wNAF = (n) => {
 };
 hashes.hmacSha256 = (key, message) => hmac(sha256, key, message);
 hashes.sha256 = (message) => sha256(message);
-var generateAttestation = (privKey) => {
-  const message = "Giving Attestation to this Account";
-  const msgBytes = utf8ToBytes2(message);
-  const prefix = utf8ToBytes2(`\x19Ethereum Signed Message:
-${msgBytes.length}`);
-  const combined = new Uint8Array(prefix.length + msgBytes.length);
-  combined.set(prefix);
-  combined.set(msgBytes, prefix.length);
-  const msgHash = keccak_256(combined);
-  const sigBytes = sign(msgHash, privKey, {
+function encodeUint256(val) {
+  const hex = val.toString(16).padStart(64, "0");
+  return hexToBytes2(hex);
+}
+function encodeAddress(addr) {
+  const clean2 = addr.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+  return hexToBytes2(clean2);
+}
+function encodeBytes32(hex) {
+  const clean2 = hex.replace(/^0x/, "");
+  if (clean2.length !== 64)
+    throw new Error("bytes32 must be 32 bytes (64 hex chars)");
+  return hexToBytes2(clean2);
+}
+function concat(...arrays) {
+  const totalLen = arrays.reduce((sum, a) => sum + a.length, 0);
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const a of arrays) {
+    result.set(a, offset);
+    offset += a.length;
+  }
+  return result;
+}
+var EIP712_DOMAIN_TYPEHASH = keccak_256(utf8ToBytes2("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"));
+var NAME_HASH = keccak_256(utf8ToBytes2("SpectreGuard"));
+var VERSION_HASH = keccak_256(utf8ToBytes2("1"));
+var INBOUND_TYPEHASH = keccak_256(utf8ToBytes2("SpectreInbound(address from,address to,uint256 value,uint256 nonce,uint256 deadline,bytes32 invoiceId)"));
+var OUTBOUND_TYPEHASH = keccak_256(utf8ToBytes2("SpectreOutbound(address safe,address to,uint256 value,uint256 nonce,uint256 deadline,bytes32 invoiceId)"));
+function computeDomainSeparator(chainId, guardAddress) {
+  return keccak_256(concat(EIP712_DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, encodeUint256(BigInt(chainId)), encodeAddress(guardAddress)));
+}
+function hashTypedDataV4(domainSeparator, structHash) {
+  const prefix = new Uint8Array([25, 1]);
+  return keccak_256(concat(prefix, domainSeparator, structHash));
+}
+function signDigest(digest, privKey) {
+  const raw = sign(digest, privKey, {
     prehash: false,
     lowS: true,
     format: "recovered"
   });
-  return sigBytes;
-};
-var onHttpTrigger = (runtime2, payload) => {
+  const sig = new Uint8Array(65);
+  sig.set(raw.slice(1, 33), 0);
+  sig.set(raw.slice(33, 65), 32);
+  sig[64] = raw[0] + 27;
+  return sig;
+}
+function signInboundAttestation(privKey, params) {
+  const domainSeparator = computeDomainSeparator(params.chainId, params.guardAddress);
+  const structHash = keccak_256(concat(INBOUND_TYPEHASH, encodeAddress(params.from), encodeAddress(params.guardAddress), encodeUint256(params.value), encodeUint256(params.nonce), encodeUint256(params.deadline), encodeBytes32(params.invoiceId)));
+  const digest = hashTypedDataV4(domainSeparator, structHash);
+  const sig = signDigest(digest, privKey);
+  return concat(encodeBytes32(params.invoiceId), encodeUint256(params.nonce), encodeUint256(params.deadline), sig);
+}
+function signOutboundAttestation(privKey, params) {
+  const domainSeparator = computeDomainSeparator(params.chainId, params.guardAddress);
+  const structHash = keccak_256(concat(OUTBOUND_TYPEHASH, encodeAddress(params.safe), encodeAddress(params.to), encodeUint256(params.value), encodeUint256(params.nonce), encodeUint256(params.deadline), encodeBytes32(params.invoiceId)));
+  const digest = hashTypedDataV4(domainSeparator, structHash);
+  const sig = signDigest(digest, privKey);
+  return concat(encodeUint256(params.nonce), encodeUint256(params.deadline), encodeBytes32(params.invoiceId), sig);
+}
+var onInboundTrigger = (runtime2, payload) => {
   const secret = runtime2.getSecret({ id: "PRIVATE_KEY" }).result();
   const privateKeyHex = secret.value.replace(/^0x/, "");
   const privateKey = hexToBytes2(privateKeyHex);
-  return generateAttestation(privateKey);
+  const config = runtime2.config;
+  const inputStr = new TextDecoder().decode(payload.input);
+  const { from: from2, value: value2, nonce, deadline, invoiceId } = JSON.parse(inputStr);
+  if (!from2 || !value2 || nonce === undefined || !deadline || !invoiceId) {
+    throw new Error("Missing required fields: from, value, nonce, deadline, invoiceId");
+  }
+  const invoiceIdBytes32 = "0x" + bytesToHex(keccak_256(utf8ToBytes2(invoiceId)));
+  return signInboundAttestation(privateKey, {
+    from: from2,
+    guardAddress: config.guardAddress,
+    value: BigInt(value2),
+    nonce: BigInt(nonce),
+    deadline: BigInt(deadline),
+    invoiceId: invoiceIdBytes32,
+    chainId: config.chainId
+  });
+};
+var onOutboundTrigger = (runtime2, payload) => {
+  const secret = runtime2.getSecret({ id: "PRIVATE_KEY" }).result();
+  const privateKeyHex = secret.value.replace(/^0x/, "");
+  const privateKey = hexToBytes2(privateKeyHex);
+  const config = runtime2.config;
+  const inputStr = new TextDecoder().decode(payload.input);
+  const { safe, to, value: value2, nonce, deadline, invoiceId } = JSON.parse(inputStr);
+  if (!safe || !to || !value2 || nonce === undefined || !deadline || !invoiceId) {
+    throw new Error("Missing required fields: safe, to, value, nonce, deadline, invoiceId");
+  }
+  const invoiceIdBytes32 = "0x" + bytesToHex(keccak_256(utf8ToBytes2(invoiceId)));
+  return signOutboundAttestation(privateKey, {
+    safe,
+    to,
+    guardAddress: config.guardAddress,
+    value: BigInt(value2),
+    nonce: BigInt(nonce),
+    deadline: BigInt(deadline),
+    invoiceId: invoiceIdBytes32,
+    chainId: config.chainId
+  });
 };
 var initWorkflow = (config) => {
-  const httpTrigger = new HTTPCapability;
+  const inboundTrigger = new HTTPCapability;
+  const outboundTrigger = new HTTPCapability;
   return [
-    handler(httpTrigger.trigger({
-      authorizedKeys: []
-    }), onHttpTrigger)
+    handler(inboundTrigger.trigger({ authorizedKeys: [] }), onInboundTrigger),
+    handler(outboundTrigger.trigger({ authorizedKeys: [] }), onOutboundTrigger)
   ];
 };
 async function main() {

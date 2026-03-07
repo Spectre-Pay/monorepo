@@ -233,14 +233,14 @@ const onSetGuardTrigger = (runtime: Runtime<Config>, payload: HTTPPayload): Uint
   const secret = runtime.getSecret({ id: "PRIVATE_KEY" }).result();
   const teePrivateKey = secret.value.replace(/^0x/, "");
   const inputStr = new TextDecoder().decode(payload.input);
-  const { safeProxyAddress, setGuardCalldata, signature } = JSON.parse(inputStr) as {
+  const { safeProxyAddress, setGuardCalldata, signature, } = JSON.parse(inputStr) as {
     safeProxyAddress?: string;
     setGuardCalldata?: string;
     signature?: string;
   };
 
   if (!safeProxyAddress || !setGuardCalldata || !signature) {
-    throw new Error("Please provide safeProxyAddress, setGuardCalldata, and signature.");
+    throw new Error("Please provide safeProxyAddress, setGuardCalldata, wnsId, and signature.");
   }
 
   const txHash = executeSetGuard(runtime, {
@@ -252,7 +252,6 @@ const onSetGuardTrigger = (runtime: Runtime<Config>, payload: HTTPPayload): Uint
     maxFeePerGas: 10000000n,
     chainId: BigInt(runtime.config.chainId),
   });
-
   const result = JSON.stringify({ txHash });
   return new TextEncoder().encode(result);
 }
@@ -274,11 +273,11 @@ const onRegisterAddressTrigger = (runtime: Runtime<Config>, payload: HTTPPayload
   const config = runtime.config;
 
   // Check if already registered
-  const existing = registryGetStealthAddress(runtime, config.registryContractAddress, config.rpcUrl, teePrivateKey, wnsId);
-  if (existing) {
-    const result = JSON.stringify({ registered: false, existing, safeProxyAddress });
-    return new TextEncoder().encode(result);
-  }
+  // const existing = registryGetStealthAddress(runtime, config.registryContractAddress, config.rpcUrl, teePrivateKey, wnsId);
+  // if (existing) {
+  //   const result = JSON.stringify({ registered: false, existing, safeProxyAddress });
+  //   return new TextEncoder().encode(result);
+  // }
 
   // Not registered — register now
   registrySetStealthAddress(runtime, config.registryContractAddress, config.rpcUrl, teePrivateKey, wnsId, safeProxyAddress, BigInt(config.chainId));

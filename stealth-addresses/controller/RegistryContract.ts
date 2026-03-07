@@ -6,7 +6,7 @@ import {
     functionSelector, encodeSingleString, encodeTwoStrings,
     encodeCalldata, ethCall, decodeString, ethGetNonce,
 } from "./rpc";
-import { signAndSendTx, waitForReceipt } from "./tx";
+import { signAndSendTx } from "./tx";
 
 const SEL_SET_STEALTH = functionSelector("setStealthAddress(string,string)");
 const SEL_GET_STEALTH = functionSelector("getStealthAddress(string)");
@@ -28,7 +28,7 @@ export const setStealthAddress = (
     const data = encodeCalldata(SEL_SET_STEALTH, encodeTwoStrings(worldId, stealthAddr));
     const from = computeAddress(privateKey);
     const nonce = ethGetNonce(runtime, rpcUrl, from);
-    const txHash = signAndSendTx(runtime, rpcUrl, privateKey, {
+    signAndSendTx(runtime, rpcUrl, privateKey, {
         to: contractAddress,
         data,
         nonce,
@@ -37,10 +37,6 @@ export const setStealthAddress = (
         maxPriorityFeePerGas: 1000000n,
         chainId,
     });
-    const receipt = waitForReceipt(runtime, rpcUrl, txHash);
-    if (receipt.status === "0x0") {
-        throw new Error(`setStealthAddress tx failed: ${txHash}`);
-    }
 };
 
 export const getStealthAddress = (

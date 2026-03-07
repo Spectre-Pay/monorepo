@@ -271,13 +271,14 @@ function runCreCapture(args: string, cwd: string = PROJECT_ROOT): string {
     } else {
       output = execSync(creCmd, { encoding: "utf-8", cwd, maxBuffer: 10 * 1024 * 1024 });
     }
+    console.log(output);
     return output;
   } catch (err: any) {
     // Capture both stdout and stderr from the failed command
     const stdout = err.stdout?.toString() || "";
     const stderr = err.stderr?.toString() || "";
     if (stderr) console.log(`  ${RED}CRE error: ${stderr.trim()}${RESET}`);
-    if (stdout) console.log(`  ${DIM}${stdout.trim()}${RESET}`);
+    if (stdout) console.log(stdout);
     throw err;
   }
 }
@@ -517,7 +518,7 @@ async function main() {
       const r = simulate<{ txHash: string }>(6, {
         safeProxyAddress: safeProxy,
         setGuardCalldata,
-        signature,
+        signature
       });
 
       if (r) {

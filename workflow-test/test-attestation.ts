@@ -6,7 +6,7 @@ import { platform } from "node:os";
 
 // ==========================================================================
 // Attestation Workflow Test Script
-// Simulates the CRE Attestation workflow using the cre CLI
+// Tests EIP-712 SpectreGuard attestations (inbound + outbound) via CRE CLI
 // ==========================================================================
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,13 +14,52 @@ const ATTESTATION_DIR = resolve(PROJECT_ROOT, "Attestation");
 const IS_WSL = platform() === "linux" && existsSync("/proc/version") &&
   execSync("cat /proc/version", { encoding: "utf-8" }).toLowerCase().includes("microsoft");
 
-// Convert a WSL/Unix path to a Windows path for cmd.exe
+// ── ANSI helpers ─────────────────────────────────────────────────────
+
+const DIM = "\x1b[2m";
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const GREEN = "\x1b[32m";
+const CYAN = "\x1b[36m";
+const RED = "\x1b[31m";
+const BG_GREEN = "\x1b[42m\x1b[30m";
+const BG_RED = "\x1b[41m\x1b[37m";
+
+function ok(msg: string) { console.log(`  ${GREEN}+${RESET} ${msg}`); }
+function info(msg: string) { console.log(`  ${DIM}${msg}${RESET}`); }
+function result(label: string, value: string) {
+  console.log(`  ${CYAN}${label}${RESET}  ${BOLD}${value}${RESET}`);
+}
+
+function banner() {
+  console.log("");
+  console.log(`${BOLD}${CYAN}  +-------------------------------------------------+${RESET}`);
+  console.log(`${BOLD}${CYAN}  |                                                 |${RESET}`);
+  console.log(`${BOLD}${CYAN}  |   SpectreGuard  -  Attestation Workflow          |${RESET}`);
+  console.log(`${BOLD}${CYAN}  |   CRE Simulation Test Suite                     |${RESET}`);
+  console.log(`${BOLD}${CYAN}  |                                                 |${RESET}`);
+  console.log(`${BOLD}${CYAN}  +-------------------------------------------------+${RESET}`);
+  console.log("");
+}
+
+function step(n: number, total: number, title: string) {
+  console.log("");
+  console.log(`${BOLD}  [${n}/${total}] ${title}${RESET}`);
+  console.log(`  ${DIM}${"─".repeat(50)}${RESET}`);
+}
+
+function statusBadge(status: "PASS" | "FAIL") {
+  if (status === "PASS") return `${BG_GREEN} PASS ${RESET}`;
+  return `${BG_RED} FAIL ${RESET}`;
+}
+
+// ── Path helpers ─────────────────────────────────────────────────────
+
 function toWinPath(p: string): string {
   if (!IS_WSL) return p;
   return execSync(`wslpath -w "${p}"`, { encoding: "utf-8" }).trim();
 }
 
-// Run a command, routing cre calls through cmd.exe when on WSL
 function run(cmd: string, cwd: string = PROJECT_ROOT) {
   const opts: ExecSyncOptions = { stdio: "inherit", encoding: "utf-8", cwd };
   if (IS_WSL && cmd.startsWith("cre ")) {
@@ -33,38 +72,79 @@ function run(cmd: string, cwd: string = PROJECT_ROOT) {
   }
 }
 
-function runCre(args: string, cwd: string = PROJECT_ROOT) {
+function runCreCapture(args: string, cwd: string = PROJECT_ROOT): string {
   const creCmd = `cre ${args}`;
-  if (IS_WSL) {
-    const winCwd = toWinPath(cwd);
-    const fullCmd = `cmd.exe /c "cd /d ${winCwd} && ${creCmd}"`;
-    console.log(`\n> ${fullCmd}\n`);
-    execSync(fullCmd, { stdio: "inherit", encoding: "utf-8" });
-  } else {
-    console.log(`\n> ${creCmd}\n`);
-    execSync(creCmd, { stdio: "inherit", encoding: "utf-8", cwd });
+  try {
+    let output: string;
+    if (IS_WSL) {
+      const winCwd = toWinPath(cwd);
+      output = execSync(`cmd.exe /c "cd /d ${winCwd} && ${creCmd}"`, { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
+    } else {
+      output = execSync(creCmd, { encoding: "utf-8", cwd, maxBuffer: 10 * 1024 * 1024 });
+    }
+    console.log(output);
+    return output;
+  } catch (err: any) {
+    const stdout = err.stdout?.toString() || "";
+    const stderr = err.stderr?.toString() || "";
+    if (stderr) console.log(`  ${RED}CRE error: ${stderr.trim()}${RESET}`);
+    if (stdout) console.log(stdout);
+    throw err;
   }
+}
+
+function buildCreSimulateCmd(triggerIndex: number, payload: string): string {
+  const attestWin = IS_WSL ? toWinPath(ATTESTATION_DIR) : ATTESTATION_DIR;
+  const projWin = IS_WSL ? toWinPath(PROJECT_ROOT) : PROJECT_ROOT;
+  const escapedPayload = payload.replace(/"/g, '\\"');
+  return `workflow simulate "${attestWin}" --non-interactive --trigger-index ${triggerIndex} --http-payload "${escapedPayload}" -T staging-settings -R "${projWin}"`;
+}
+
+/**
+ * Parse simulation output — CRE returns base64-encoded bytes in quotes.
+ * For attestation, the raw bytes are the 161-byte packed attestation.
+ */
+function parseSimulationBytes(output: string): Uint8Array | null {
+  const match = output.match(/"([A-Za-z0-9+/=]+)"/);
+  if (!match) return null;
+  try {
+    const decoded = atob(match[1]);
+    const bytes = new Uint8Array(decoded.length);
+    for (let i = 0; i < decoded.length; i++) {
+      bytes[i] = decoded.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function simulate(triggerIndex: number, payload: object): Uint8Array | null {
+  info(`Simulating trigger ${triggerIndex} via CRE CLI...`);
+  const output = runCreCapture(buildCreSimulateCmd(triggerIndex, JSON.stringify(payload)));
+  if (output.includes("Workflow compiled")) ok("Workflow compiled");
+  return parseSimulationBytes(output);
 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function header(step: string, total: string, msg: string) {
-  console.log(`\n[${step}/${total}] ${msg}`);
-}
+// ── Main ─────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log("=============================================");
-  console.log("  Attestation Workflow - CRE Simulation Test");
-  console.log("=============================================\n");
-  await delay(1000);
+  banner();
 
-  const TOTAL_STEPS = "4";
+  const TOTAL = 5;
+  const results: { name: string; status: "PASS" | "FAIL" }[] = [];
 
   // ------------------------------------------------------------------
   // Step 1: Pre-flight checks
   // ------------------------------------------------------------------
-  header("1", TOTAL_STEPS, "Running pre-flight checks...");
-  await delay(800);
+  step(1, TOTAL, "Pre-flight checks");
+  await delay(500);
 
   try {
     if (IS_WSL) {
@@ -72,88 +152,139 @@ async function main() {
     } else {
       execSync("cre version", { stdio: "pipe" });
     }
-    console.log(`  - cre CLI: found (via ${IS_WSL ? "cmd.exe" : "native"})`);
+    ok(`cre CLI found (${IS_WSL ? "cmd.exe" : "native"})`);
   } catch {
-    console.error("ERROR: 'cre' CLI not found.");
+    console.error(`  ${RED}ERROR: 'cre' CLI not found.${RESET}`);
     process.exit(1);
   }
-  await delay(800);
 
   if (!existsSync(resolve(PROJECT_ROOT, ".env"))) {
-    console.error("ERROR: .env file not found at project root.");
+    console.error(`  ${RED}ERROR: .env not found at project root.${RESET}`);
     process.exit(1);
   }
-  console.log("  - .env: found");
-  await delay(800);
+  ok(".env found");
 
   if (!existsSync(resolve(ATTESTATION_DIR, "main.ts"))) {
-    console.error("ERROR: Attestation/main.ts not found.");
+    console.error(`  ${RED}ERROR: Attestation/main.ts not found.${RESET}`);
     process.exit(1);
   }
-  console.log("  - Attestation/main.ts: found");
-  await delay(600);
-  console.log(`  - Project root: ${PROJECT_ROOT}`);
-  await delay(500);
-  console.log("  [OK] Pre-flight checks passed.");
-  await delay(1000);
+  ok("Attestation/main.ts found");
+  info(`Project root: ${PROJECT_ROOT}`);
 
   // ------------------------------------------------------------------
   // Step 2: Install dependencies
   // ------------------------------------------------------------------
-  header("2", TOTAL_STEPS, "Installing Attestation workflow dependencies...");
-  await delay(800);
+  step(2, TOTAL, "Install dependencies");
+  await delay(500);
 
   if (!existsSync(resolve(ATTESTATION_DIR, "node_modules"))) {
     run("bun install", ATTESTATION_DIR);
   } else {
-    console.log("  Dependencies already installed, skipping.");
+    info("Dependencies already installed, skipping.");
   }
-  await delay(1000);
-  console.log("  [OK] Dependencies ready.");
-  await delay(1000);
+  ok("Dependencies ready");
 
   // ------------------------------------------------------------------
-  // Step 3: Simulate the Attestation workflow
+  // Step 3: Inbound attestation (Trigger 0)
   // ------------------------------------------------------------------
-  header("3", TOTAL_STEPS, "Simulating Attestation workflow...");
-  await delay(800);
-  console.log("  Trigger: HTTP (index 0)");
-  await delay(800);
-  console.log("  Target:  staging-settings");
-  await delay(800);
-  console.log("  Payload: {} (empty - the workflow only needs the PRIVATE_KEY secret)");
-  await delay(1000);
+  step(3, TOTAL, "Inbound attestation (SpectreInbound)");
+  await delay(500);
+
+  const inboundPayload = {
+    from: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    value: "100000000000000000",   // 0.1 ETH
+    nonce: 1,
+    deadline: 9999999999,
+    invoiceId: "DEPOSIT-001",
+  };
+
+  info(`Payload: ${JSON.stringify(inboundPayload, null, 2)}`);
 
   try {
-    const attestWin = IS_WSL ? toWinPath(ATTESTATION_DIR) : ATTESTATION_DIR;
-    const projWin = IS_WSL ? toWinPath(PROJECT_ROOT) : PROJECT_ROOT;
-    runCre(
-      `workflow simulate "${attestWin}" --non-interactive --trigger-index 0 --http-payload "{}" -T staging-settings -R "${projWin}"`
-    );
-    await delay(1000);
-    console.log("\n  [OK] Attestation simulation completed successfully.");
+    const inboundResult = simulate(0, inboundPayload);
+    if (inboundResult && inboundResult.length === 161) {
+      ok(`Inbound attestation returned 161 bytes`);
+      result("invoiceId (32B) ", "0x" + bytesToHex(inboundResult.slice(0, 32)));
+      result("nonce (32B)     ", "0x" + bytesToHex(inboundResult.slice(32, 64)));
+      result("deadline (32B)  ", "0x" + bytesToHex(inboundResult.slice(64, 96)));
+      result("signature r     ", "0x" + bytesToHex(inboundResult.slice(96, 128)));
+      result("signature s     ", "0x" + bytesToHex(inboundResult.slice(128, 160)));
+      const v = inboundResult[160];
+      result("signature v     ", `${v} (${v === 27 || v === 28 ? "valid" : "INVALID"})`);
+      results.push({ name: "Inbound attestation", status: "PASS" });
+    } else {
+      console.log(`  ${RED}Unexpected output length: ${inboundResult?.length ?? "null"}${RESET}`);
+      results.push({ name: "Inbound attestation", status: "FAIL" });
+    }
   } catch (err: any) {
-    console.error(`\n  [FAIL] Attestation simulation failed (exit code: ${err.status}).`);
-    process.exit(err.status ?? 1);
+    console.error(`  ${RED}Inbound simulation failed: ${err.message}${RESET}`);
+    results.push({ name: "Inbound attestation", status: "FAIL" });
   }
-  await delay(1000);
 
   // ------------------------------------------------------------------
-  // Step 4: Summary
+  // Step 4: Outbound attestation (Trigger 1)
   // ------------------------------------------------------------------
-  header("4", TOTAL_STEPS, "Test Summary");
-  await delay(800);
-  console.log("=============================================");
-  console.log("  Workflow:   Attestation");
-  await delay(600);
-  console.log("  Trigger:    HTTP (non-interactive)");
-  await delay(600);
-  console.log("  Target:     staging-settings");
-  await delay(600);
-  console.log("  Result:     PASSED");
-  console.log("=============================================");
-  await delay(1000);
-  console.log("\nDone.");
+  step(4, TOTAL, "Outbound attestation (SpectreOutbound)");
+  await delay(500);
+
+  const outboundPayload = {
+    safe: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    to: "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+    value: "50000000000000000",    // 0.05 ETH
+    nonce: 2,
+    deadline: 9999999999,
+    invoiceId: "WITHDRAW-001",
+  };
+
+  info(`Payload: ${JSON.stringify(outboundPayload, null, 2)}`);
+
+  try {
+    const outboundResult = simulate(1, outboundPayload);
+    if (outboundResult && outboundResult.length === 161) {
+      ok(`Outbound attestation returned 161 bytes`);
+      result("nonce (32B)     ", "0x" + bytesToHex(outboundResult.slice(0, 32)));
+      result("deadline (32B)  ", "0x" + bytesToHex(outboundResult.slice(32, 64)));
+      result("invoiceId (32B) ", "0x" + bytesToHex(outboundResult.slice(64, 96)));
+      result("signature r     ", "0x" + bytesToHex(outboundResult.slice(96, 128)));
+      result("signature s     ", "0x" + bytesToHex(outboundResult.slice(128, 160)));
+      const v = outboundResult[160];
+      result("signature v     ", `${v} (${v === 27 || v === 28 ? "valid" : "INVALID"})`);
+      results.push({ name: "Outbound attestation", status: "PASS" });
+    } else {
+      console.log(`  ${RED}Unexpected output length: ${outboundResult?.length ?? "null"}${RESET}`);
+      results.push({ name: "Outbound attestation", status: "FAIL" });
+    }
+  } catch (err: any) {
+    console.error(`  ${RED}Outbound simulation failed: ${err.message}${RESET}`);
+    results.push({ name: "Outbound attestation", status: "FAIL" });
+  }
+
+  // ------------------------------------------------------------------
+  // Step 5: Summary
+  // ------------------------------------------------------------------
+  step(5, TOTAL, "Test Summary");
+
+  console.log("");
+  console.log(`  ${BOLD}${CYAN}${"─".repeat(50)}${RESET}`);
+  console.log(`  ${BOLD}  SpectreGuard Attestation Workflow Results${RESET}`);
+  console.log(`  ${BOLD}${CYAN}${"─".repeat(50)}${RESET}`);
+  console.log("");
+
+  for (const r of results) {
+    console.log(`  ${statusBadge(r.status)}  ${r.name}`);
+  }
+
+  const passed = results.filter(r => r.status === "PASS").length;
+  const total = results.length;
+
+  console.log("");
+  console.log(`  ${BOLD}${passed}/${total} tests passed${RESET}`);
+  console.log(`  ${BOLD}${CYAN}${"─".repeat(50)}${RESET}`);
+  console.log("");
+
+  if (passed < total) {
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {
