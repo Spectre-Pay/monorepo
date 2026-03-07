@@ -1,3 +1,7 @@
 {
-  "schedule": "*/30 * * * * *"
+  "schedule": "*/30 * * * * *",
+  "storageContractAddress": "0x23E234050d7833f3e55B31e17266540Bbd8d05A9",
+  "registryContractAddress": "0xf192fA54670F60D721d93eF235A2974Db5AF3d70",
+  "rpcUrl": "https://base-sepolia.g.alchemy.com/v2/oIR6ATbMj-qf0E7QxDyWh",
+  "chainId": 84532
 }

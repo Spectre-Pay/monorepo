@@ -1,39 +1,4 @@
-// function signMessage(privKey: Uint8Array, message: string): Uint8Array {
-//   const msgBytes = utf8ToBytes(message);
-//   const prefix = utf8ToBytes(
-//     `\x19Ethereum Signed Message:\n${msgBytes.length}`,
-//   );
-//   const combined = new Uint8Array(prefix.length + msgBytes.length);
-//   combined.set(prefix);
-//   combined.set(msgBytes, prefix.length);
-//   const msgHash = keccak_256(combined);
 
-//   // Sign with recovery bit
-//   const sigBytes = sign(msgHash, privKey, {
-//     prehash: false,
-//     lowS: true,
-//     format: "recovered",
-//   });
-
-//   return sigBytes; // 65 bytes: r(32) + s(32) + v(1)
-// }
-
-// function generateStealthPrivateKey(
-//   spendingPrivateKey: Uint8Array,
-//   ephemeralPublicKey: Uint8Array,
-// ): string {
-//   const sharedSecret = getSharedSecret(
-//     spendingPrivateKey,
-//     ephemeralPublicKey,
-//     false,
-//   );
-//   const hashedSecret = keccak_256(sharedSecret.slice(1));
-//   const hashBigInt = BigInt("0x" + bytesToHex(hashedSecret));
-//   const spendBigInt = BigInt("0x" + bytesToHex(spendingPrivateKey));
-//   const curveN = Point.CURVE().n;
-//   const stealthKey = etc.mod(spendBigInt * hashBigInt, curveN);
-//   return "0x" + stealthKey.toString(16).padStart(64, "0");
-// }
 
 
 import {
@@ -41,11 +6,13 @@ import {
   getSharedSecret,
   Point,
   hashes,
+  etc,
+  sign,
 } from "@noble/secp256k1";
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { HDKey } from "@scure/bip32";
 
 // Enable sync hashes for noble/secp256k1
@@ -159,3 +126,48 @@ export function generateStealthAddresses(
 
   return results;
 }
+
+
+function signMessage(privKey: Uint8Array, message: string): Uint8Array {
+  const msgBytes = utf8ToBytes(message);
+  const prefix = utf8ToBytes(
+    `\x19Ethereum Signed Message:\n${msgBytes.length}`,
+  );
+  const combined = new Uint8Array(prefix.length + msgBytes.length);
+  combined.set(prefix);
+  combined.set(msgBytes, prefix.length);
+  const msgHash = keccak_256(combined);
+
+  // Sign with recovery bit
+  const sigBytes = sign(msgHash, privKey, {
+    prehash: false,
+    lowS: true,
+    format: "recovered",
+  });
+
+  return sigBytes; // 65 bytes: r(32) + s(32) + v(1)
+}
+
+function generateStealthPrivateKey(
+  spendingPrivateKey: Uint8Array,
+  ephemeralPublicKey: Uint8Array,
+): string {
+  const sharedSecret = getSharedSecret(
+    spendingPrivateKey,
+    ephemeralPublicKey,
+    false,
+  );
+  const hashedSecret = keccak_256(sharedSecret.slice(1));
+  const hashBigInt = BigInt("0x" + bytesToHex(hashedSecret));
+  const spendBigInt = BigInt("0x" + bytesToHex(spendingPrivateKey));
+  const curveN = Point.CURVE().n;
+  const stealthKey = etc.mod(spendBigInt * hashBigInt, curveN);
+  return "0x" + stealthKey.toString(16).padStart(64, "0");
+}
+
+// // Encrypt the stealth address with TEE key and store on-chain
+//   const encryptedAddress = encrypt(addresses.stealthAddress, teeKey);
+//   await storeEncryptedAddress(config.storageContractAddress, config.rpcUrl, config.teePrivateKey, wnsId, encryptedAddress);
+
+//   // Also store in Registry: map World ID to encrypted stealth address
+//   await registrySetStealthAddress(config.registryContractAddress, config.rpcUrl, config.teePrivateKey, wnsId, encryptedAddress);

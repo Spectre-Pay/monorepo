@@ -1,113 +1,210 @@
-import "@nomicfoundation/hardhat-ethers";
-import hardhat from "hardhat";
-import { ethers } from "ethers";
+import type { Runtime } from "@chainlink/cre-sdk";
+import { getPublicKey } from "@noble/secp256k1";
+import { keccak_256 } from "@noble/hashes/sha3.js";
+import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { SafeArtifact, SafeProxyFactoryArtifact, SpectreGuardArtifact } from "./bytecodes";
+import { functionSelector, ethGasPrice, ethGetNonce, ethChainId } from "./rpc";
+import { signAndSendTx, waitForReceipt, deployContract } from "./tx";
 
-// Store pending tx context for later execution
-interface PendingTx {
-    safeAddress: string;
-    setGuardData: string;
-    safeInterface: ethers.Interface;
+// Minimal ABI encoding helpers
+export function padLeft(hex: string, bytes: number = 32): string {
+    return hex.padStart(bytes * 2, "0");
 }
 
-const pendingTxs = new Map<string, PendingTx>();
-
-const getHardhatEthers = async () => {
-    const connection = await hardhat.network.connect();
-    return connection.ethers;
+function encodeAddress(addr: string): string {
+    return padLeft(addr.replace(/^0x/, "").toLowerCase());
 }
 
-export const generateSafe = async (deployer: Uint8Array) => {
-    const hre = await getHardhatEthers();
-    const deployerAddress = ethers.computeAddress(ethers.hexlify(deployer));
-    const [signer] = await hre.getSigners();
+function encodeUint256(val: bigint | number): string {
+    return padLeft(BigInt(val).toString(16));
+}
+
+// Encode Safe.setup(address[],uint256,address,bytes,address,address,uint256,address)
+export function encodeSafeSetup(ownerAddress: string): string {
+    const sel = functionSelector("setup(address[],uint256,address,bytes,address,address,uint256,address)");
+    const zero = encodeUint256(0);
+    const zeroAddr = encodeAddress("0x0000000000000000000000000000000000000000");
+
+    // 8 params, first (owners) and fourth (data) are dynamic
+    const ownersOffset = encodeUint256(8 * 32);
+    const threshold = encodeUint256(1);
+    const dataOffset = encodeUint256(8 * 32 + 2 * 32); // owners: len(32) + 1 addr(32)
+
+    // Owners array: [length=1, owner]
+    const ownersLen = encodeUint256(1);
+    const owner = encodeAddress(ownerAddress);
+
+    // Empty bytes: [length=0]
+    const bytesLen = encodeUint256(0);
+
+    return "0x" + sel + ownersOffset + threshold + zeroAddr + dataOffset +
+        zeroAddr + zeroAddr + zero + zeroAddr +
+        ownersLen + owner + bytesLen;
+}
+
+// Encode createProxyWithNonce(address,bytes,uint256)
+export function encodeCreateProxy(singletonAddr: string, setupData: string, saltNonce: number): string {
+    const sel = functionSelector("createProxyWithNonce(address,bytes,uint256)");
+    const singleton = encodeAddress(singletonAddr);
+    const salt = encodeUint256(saltNonce);
+    const bytesOffset = encodeUint256(3 * 32);
+
+    const setupBytes = hexToBytes(setupData.replace(/^0x/, ""));
+    const bytesLen = encodeUint256(setupBytes.length);
+    const bytesHex = bytesToHex(setupBytes);
+    const padded = bytesHex.padEnd(Math.ceil(bytesHex.length / 64) * 64, "0");
+
+    return "0x" + sel + singleton + bytesOffset + salt + bytesLen + padded;
+}
+
+// Encode setGuard(address)
+export function encodeSetGuard(guardAddr: string): string {
+    const sel = functionSelector("setGuard(address)");
+    return "0x" + sel + encodeAddress(guardAddr);
+}
+
+// Compute address from private key
+export function computeAddress(privateKey: string): string {
+    const pubKey = getPublicKey(hexToBytes(privateKey.replace(/^0x/, "")), false);
+    return "0x" + bytesToHex(keccak_256(pubKey.slice(1))).slice(-40);
+}
+
+export interface DeployResult {
+    safeSingleton: string;
+    safeProxyFactory: string;
+    safeProxy: string;
+    spectreGuard: string;
+    setGuardCalldata: string;
+}
+
+export function deploySafeWithGuard(
+    runtime: Runtime<any>,
+    params: {
+        rpcUrl: string;
+        deployerPrivateKey: string;
+        ownerAddress: string;
+        teeSignerAddress: string;
+        saltNonce: number;
+    },
+): DeployResult {
+    const { rpcUrl, deployerPrivateKey, ownerAddress, teeSignerAddress, saltNonce } = params;
+
+    const from = computeAddress(deployerPrivateKey);
+    let nonce = ethGetNonce(runtime, rpcUrl, from);
+    const gasPrice = ethGasPrice(runtime, rpcUrl);
+    const chainId = ethChainId(runtime, rpcUrl);
 
     // 1. Deploy Safe singleton
-    const SafeFactory = await hre.getContractFactory("Safe");
-    const safeSingleton = await SafeFactory.deploy();
-    await safeSingleton.waitForDeployment();
+    const safeSingletonAddr = deployContract(
+        runtime, rpcUrl, deployerPrivateKey,
+        SafeArtifact.bytecode, nonce, gasPrice, chainId,
+    );
+    nonce++;
 
     // 2. Deploy SafeProxyFactory
-    const ProxyFactoryFactory = await hre.getContractFactory("SafeProxyFactory");
-    const proxyFactory = await ProxyFactoryFactory.deploy();
-    await proxyFactory.waitForDeployment();
-
-    // 3. Create a Safe proxy for the deployer (1-of-1)
-    const setupData = safeSingleton.interface.encodeFunctionData("setup", [
-        [deployerAddress],
-        1,
-        ethers.ZeroAddress,
-        "0x",
-        ethers.ZeroAddress,
-        ethers.ZeroAddress,
-        0,
-        ethers.ZeroAddress,
-    ]);
-
-    const tx = await proxyFactory.createProxyWithNonce(
-        await safeSingleton.getAddress(),
-        setupData,
-        0
+    const proxyFactoryAddr = deployContract(
+        runtime, rpcUrl, deployerPrivateKey,
+        SafeProxyFactoryArtifact.bytecode, nonce, gasPrice, chainId,
     );
-    const receipt = await tx.wait();
-    if (!receipt) throw new Error("Transaction receipt is null");
+    nonce++;
 
-    const event = receipt.logs.find((log: any) => {
-        try {
-            return proxyFactory.interface.parseLog(log)?.name === "ProxyCreation";
-        } catch {
-            return false;
-        }
+    // 3. Create Safe proxy with owner
+    const setupData = encodeSafeSetup(ownerAddress);
+    const createProxyData = encodeCreateProxy(safeSingletonAddr, setupData, saltNonce);
+
+    const createTxHash = signAndSendTx(runtime, rpcUrl, deployerPrivateKey, {
+        to: proxyFactoryAddr,
+        data: createProxyData,
+        nonce,
+        gasLimit: 5000000n,
+        maxFeePerGas: gasPrice,
+        maxPriorityFeePerGas: 1000000n,
+        chainId,
     });
-    const safeAddress = proxyFactory.interface.parseLog(event!)!.args[0];
+    const createReceipt = waitForReceipt(runtime, rpcUrl, createTxHash);
+    nonce++;
 
-    // 4. Deploy SpectreGuard
-    // For local testing, use deployer as TEE signer
-    const teeSigner = deployerAddress;
-    const GuardFactory = await hre.getContractFactory("SpectreGuard");
-    const guard = await GuardFactory.deploy(teeSigner, safeAddress);
-    await guard.waitForDeployment();
-
-    // 5. Attach guard to Safe
-    console.log("\n--- Attaching Guard to Safe ---");
-    const safe = new ethers.Contract(safeAddress, safeSingleton.interface, signer);
-    const setGuardData = safe.interface.encodeFunctionData("setGuard", [
-        await guard.getAddress(),
-    ]);
-
-    const safeNonce = await safe.nonce();
-    const txHash = await safe.getTransactionHash(
-        safeAddress, 0, setGuardData, 0, 0, 0, 0,
-        ethers.ZeroAddress, ethers.ZeroAddress, safeNonce
+    // Parse ProxyCreation event to get proxy address
+    const proxyCreationTopic = "0x" + bytesToHex(keccak_256(utf8ToBytes("ProxyCreation(address,address)")));
+    const proxyLog = createReceipt.logs?.find((log: any) =>
+        log.topics?.[0]?.toLowerCase() === proxyCreationTopic.toLowerCase()
     );
-    // Store context for later execution
-    pendingTxs.set(txHash, {
-        safeAddress,
-        setGuardData,
-        safeInterface: safeSingleton.interface,
+    if (!proxyLog) throw new Error("ProxyCreation event not found");
+    const safeProxyAddr = "0x" + proxyLog.topics[1].slice(-40);
+
+    // 4. Deploy SpectreGuard(teeSigner, safeProxy)
+    const guardBytecode = SpectreGuardArtifact.bytecode +
+        encodeAddress(teeSignerAddress) + encodeAddress(safeProxyAddr);
+
+    const guardAddr = deployContract(
+        runtime, rpcUrl, deployerPrivateKey,
+        guardBytecode, nonce, gasPrice, chainId,
+    );
+
+    // 5. Compute setGuard calldata
+    const setGuardCalldata = encodeSetGuard(guardAddr);
+
+    return {
+        safeSingleton: safeSingletonAddr,
+        safeProxyFactory: proxyFactoryAddr,
+        safeProxy: safeProxyAddr,
+        spectreGuard: guardAddr,
+        setGuardCalldata,
+    };
+}
+
+export function executeSetGuard(
+    runtime: Runtime<any>,
+    params: {
+        rpcUrl: string;
+        deployerPrivateKey: string;
+        safeProxyAddress: string;
+        setGuardCalldata: string;
+        signature: string;
+        maxFeePerGas: bigint;
+        chainId: bigint;
+    },
+): string {
+    const { rpcUrl, deployerPrivateKey, safeProxyAddress, setGuardCalldata, signature, maxFeePerGas, chainId } = params;
+
+    const sel = functionSelector(
+        "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
+    );
+    const zero = encodeUint256(0);
+    const zeroAddr = encodeAddress("0x0000000000000000000000000000000000000000");
+
+    // Adjust v byte +4 for eth_sign compatibility
+    const sigBytes = hexToBytes(signature.replace(/^0x/, ""));
+    sigBytes[64] += 4;
+    const sigHex = bytesToHex(sigBytes);
+
+    const calldataBytes = hexToBytes(setGuardCalldata.replace(/^0x/, ""));
+    const calldataHex = bytesToHex(calldataBytes);
+    const calldataPadded = calldataHex.padEnd(Math.ceil(calldataHex.length / 64) * 64, "0");
+
+    // Dynamic offsets for bytes params (data at param index 2, signatures at index 9)
+    const dataOffset = encodeUint256(10 * 32);
+    const sigsOffset = encodeUint256(10 * 32 + 32 + Math.ceil(calldataBytes.length / 32) * 32);
+
+    const execData = "0x" + sel +
+        encodeAddress(safeProxyAddress) + zero + dataOffset +
+        encodeUint256(0) + zero + zero + zero +
+        zeroAddr + zeroAddr + sigsOffset +
+        encodeUint256(calldataBytes.length) + calldataPadded +
+        encodeUint256(sigBytes.length) + sigHex.padEnd(Math.ceil(sigHex.length / 64) * 64, "0");
+
+    const from = computeAddress(deployerPrivateKey);
+    const nonce = ethGetNonce(runtime, rpcUrl, from);
+
+    const txHash = signAndSendTx(runtime, rpcUrl, deployerPrivateKey, {
+        to: safeProxyAddress,
+        data: execData,
+        nonce,
+        gasLimit: 5000000n,
+        maxFeePerGas,
+        maxPriorityFeePerGas: 1000000n,
+        chainId,
     });
 
     return txHash;
-}
-
-export const executeSafeTx = async (txHash: string, signedTx: string) => {
-    const hre = await getHardhatEthers();
-    const pending = pendingTxs.get(txHash);
-    if (!pending) throw new Error("No pending transaction found for this txHash.");
-
-    const [signer] = await hre.getSigners();
-    const safe = new ethers.Contract(pending.safeAddress, pending.safeInterface, signer);
-
-    const sigBytes = ethers.getBytes(signedTx);
-    sigBytes[64] += 4;
-
-    const execTx = await safe.execTransaction(
-        pending.safeAddress, 0, pending.setGuardData, 0, 0, 0, 0,
-        ethers.ZeroAddress, ethers.ZeroAddress,
-        ethers.hexlify(sigBytes)
-    );
-    const receipt = await execTx.wait();
-
-    pendingTxs.delete(txHash);
-
-    return receipt.hash;
 }
