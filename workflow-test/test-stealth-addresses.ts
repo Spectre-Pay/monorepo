@@ -107,8 +107,9 @@ function signMessage(privKey: Uint8Array, message: string): Uint8Array {
 function deriveStealthKeys(privateKeyHex: string) {
   const privKeyBytes = hexToBytes(privateKeyHex);
   const sig = signMessage(privKeyBytes, "Generate Stealth Keys");
-  const spendingPrivateKey = keccak_256(sig.slice(0, 32));
-  const viewingPrivateKey = keccak_256(sig.slice(32, 64));
+  // noble/secp256k1 v3 format: recovery(1) || r(32) || s(32)
+  const spendingPrivateKey = keccak_256(sig.slice(1, 33));
+  const viewingPrivateKey = keccak_256(sig.slice(33, 65));
   const spendingPublicKey = getPublicKey(spendingPrivateKey, false);
   return {
     spendingPrivateKey,
@@ -235,13 +236,35 @@ function signSafeTransaction(
     format: "recovered",
   });
 
-  // sig is 65 bytes: r(32) + s(32) + v(1), where v is 0 or 1
-  // Convert v to 27/28
+  // noble/secp256k1 v3 format: recovery(1) || r(32) || s(32)
+  // Convert to Ethereum format: r(32) || s(32) || v(1) with v = recovery + 27
   const sigBytes = new Uint8Array(65);
-  sigBytes.set(sig.slice(0, 64));
-  sigBytes[64] = sig[64] + 27;
+  sigBytes.set(sig.slice(1, 65));  // r(32) + s(32)
+  sigBytes[64] = sig[0] + 27;     // v = recovery + 27
 
   return "0x" + bytesToHex(sigBytes);
+}
+
+// ── Direct RPC helper (outside CRE) ─────────────────────────────────
+
+async function rpcCallDirect(rpcUrl: string, method: string, params: any[]): Promise<any> {
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+  });
+  const json = await res.json() as any;
+  if (json.error) throw new Error(`RPC error: ${JSON.stringify(json.error)}`);
+  return json.result;
+}
+
+async function readSafeNonce(rpcUrl: string, safeAddress: string): Promise<number> {
+  // nonce() selector = 0xaffed0e0
+  const result = await rpcCallDirect(rpcUrl, "eth_call", [
+    { to: safeAddress, data: "0xaffed0e0" },
+    "latest",
+  ]);
+  return Number(BigInt(result));
 }
 
 // ── CRE CLI helpers ──────────────────────────────────────────────────
@@ -482,34 +505,34 @@ async function main() {
       info("Missing safeProxy or setGuardCalldata from previous steps");
       results.push({ name: "Execute setGuard", status: "SKIP" });
     } else {
-      // Derive the stealth private key to sign the Safe transaction
       info("Deriving stealth private key from spending key + ephemeral key...");
 
       const spendingPubKeyBytes = hexToBytes(spendingPublicKeyHex);
       const ephemeralPrivKey = deriveEphemeralPrivateKey(viewingPrivateKey, BigInt(nonce) + 1n, CHAIN_ID);
       const stealthPrivKey = deriveStealthPrivateKey(spendingPrivateKey, spendingPubKeyBytes, ephemeralPrivKey);
 
-      // Verify: derived stealth address matches the one from trigger 0
+      // Verify derived stealth address matches trigger 0
       const stealthPubKey = getPublicKey(stealthPrivKey, false);
       const derivedAddr = "0x" + bytesToHex(keccak_256(stealthPubKey.slice(1))).slice(-40);
       result("Derived owner  ", derivedAddr);
+      result("Expected owner ", stealthAddress!);
 
       if (derivedAddr.toLowerCase() !== stealthAddress!.toLowerCase()) {
         console.log(`  ${YELLOW}Warning: derived address doesn't match stealth address${RESET}`);
-        console.log(`  ${YELLOW}  expected: ${stealthAddress}${RESET}`);
-        console.log(`  ${YELLOW}  derived:  ${derivedAddr}${RESET}`);
       } else {
         ok("Stealth private key verified (address matches)");
       }
 
-      // Sign the Safe execTransaction for setGuard
-      info("Signing Safe transaction (EIP-712 + eth_sign)...");
+      // Read the Safe's actual nonce from chain (avoids GS026 if nonce > 0)
+      const stagingConfig = JSON.parse(readFileSync(resolve(STEALTH_DIR, "config.staging.json"), "utf-8"));
+      const safeNonce = await readSafeNonce(stagingConfig.rpcUrl, safeProxy);
+      info(`Signing Safe transaction (EIP-712 + eth_sign) with Safe nonce ${safeNonce}...`);
       const signature = signSafeTransaction(
         stealthPrivKey,
         safeProxy,
         safeProxy, // Safe calls itself to setGuard
         setGuardCalldata,
-        0, // Safe internal nonce (fresh safe)
+        safeNonce,
         CHAIN_ID,
       );
       result("Signature      ", `${signature.slice(0, 20)}...${signature.slice(-10)}`);

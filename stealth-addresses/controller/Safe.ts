@@ -3,7 +3,7 @@ import { getPublicKey } from "@noble/secp256k1";
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { SafeArtifact, SafeProxyFactoryArtifact, SpectreGuardArtifact } from "./bytecodes";
-import { functionSelector, ethGasPrice, ethGetNonce, ethChainId } from "./rpc";
+import { functionSelector, ethGasPrice, ethGetNonce, ethChainId, ethCall } from "./rpc";
 import { signAndSendTx, waitForReceipt, deployContract } from "./tx";
 
 // Minimal ABI encoding helpers
@@ -207,4 +207,14 @@ export function executeSetGuard(
     });
 
     return txHash;
+}
+
+export function getSafeNonce(
+    runtime: Runtime<any>,
+    rpcUrl: string,
+    safeAddress: string,
+): bigint {
+    const sel = functionSelector("nonce()");
+    const result = ethCall(runtime, rpcUrl, safeAddress, "0x" + sel);
+    return BigInt(result);
 }
