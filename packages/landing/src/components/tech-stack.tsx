@@ -2,16 +2,17 @@
 
 import { motion, useInView } from "framer-motion";
 import { useRef } from "react";
+import Image from "next/image";
 
 const ease = [0.16, 1, 0.3, 1] as const;
 
 const stack = [
-  { layer: "Identity", tech: "World Chain ID" },
-  { layer: "Compliance", tech: "Chainlink CRE" },
-  { layer: "Smart Account", tech: "Safe{Wallet}" },
-  { layer: "Stealth", tech: "ERC-5564" },
-  { layer: "Verification", tech: "EIP-712" },
-  { layer: "Network", tech: "Base" },
+  { layer: "Runtime", tech: "Aleo" },
+  { layer: "Language", tech: "Leo" },
+  { layer: "Proofs", tech: "ZK-SNARKs" },
+  { layer: "Compliance", tech: "Merkle Exclusion" },
+  { layer: "Privacy", tech: "Encrypted Records" },
+  { layer: "Settlement", tech: "On-chain" },
 ];
 
 export function TechStack() {
@@ -19,22 +20,21 @@ export function TechStack() {
   const isInView = useInView(ref, { once: true, margin: "-15%" });
 
   return (
-    <section className="py-40 px-6 sm:px-10">
+    <section id="stack" className="py-40 px-6 sm:px-10">
       <div className="max-w-[1400px] mx-auto">
         <motion.div
           ref={ref}
           initial={{ opacity: 0 }}
           animate={isInView ? { opacity: 1 } : {}}
           transition={{ duration: 1, ease }}
-          className="mb-24"
+          className="mb-24 flex flex-col sm:flex-row sm:items-end justify-between gap-6"
         >
           <h2 className="font-serif text-[clamp(2.5rem,5vw,5rem)] leading-[0.95] tracking-[-0.02em]">
             Built on
             <br />
-            <span className="italic text-muted-foreground">
-              proven infrastructure
-            </span>
+            <span className="italic text-sp glow-text">zero-knowledge</span>
           </h2>
+          <Image src="/aleo.svg" alt="Aleo" width={108} height={40} className="opacity-20" />
         </motion.div>
 
         <div>

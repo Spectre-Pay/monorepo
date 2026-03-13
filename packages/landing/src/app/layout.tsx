@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
-import { Geist_Mono } from "next/font/google";
-import { Instrument_Serif } from "next/font/google";
+import { Geist_Mono, Instrument_Serif } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
@@ -18,7 +17,7 @@ const mono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Spectre Invoices",
   description:
-    "Privacy-preserving, compliance-first invoice & payment protocol",
+    "Zero-knowledge invoice & payment protocol on Aleo",
 };
 
 export default function RootLayout({

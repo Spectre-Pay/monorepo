@@ -1,19 +1,21 @@
 import { Nav } from "@/components/nav";
 import { Hero } from "@/components/hero";
-import { HowItWorks } from "@/components/how-it-works";
-import { Architecture } from "@/components/architecture";
-import { Security } from "@/components/security";
+import { Problem } from "@/components/problem";
+import { ProductDemo } from "@/components/product-demo";
+import { ZkProof } from "@/components/zk-proof";
+import { PaymentExecution } from "@/components/payment-execution";
 import { TechStack } from "@/components/tech-stack";
 import { Footer } from "@/components/footer";
 
 export default function Home() {
   return (
-    <div className="grain">
+    <div className="grain scanlines">
       <Nav />
       <Hero />
-      <HowItWorks />
-      <Architecture />
-      <Security />
+      <Problem />
+      <ProductDemo />
+      <ZkProof />
+      <PaymentExecution />
       <TechStack />
       <Footer />
     </div>

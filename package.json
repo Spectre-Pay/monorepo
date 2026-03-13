@@ -6,9 +6,6 @@
     "packages/*"
   ],
   "scripts": {
-    "contracts:compile": "bun run --filter @spectre/contracts compile",
-    "contracts:test": "bun run --filter @spectre/contracts test",
-    "contracts:deploy": "bun run --filter @spectre/contracts deploy:local",
     "app:dev": "bun run --filter @spectre/app dev",
     "app:build": "bun run --filter @spectre/app build",
     "landing:dev": "bun run --filter @spectre/landing dev",
